@@ -1,0 +1,257 @@
+---
+title: "NYC Schools Perceptions"
+author: "Jeff Young"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Project Background
+This project will analyze the [2011 New York City School Survey data](https://data.cityofnewyork.us/Education/2011-NYC-School-Survey/mnz3-dyi8).  According to the NYC Open Data website, this survey "ranks among the largest surveys of any kind ever conducted nationally." Specifically, this survey is meant to provide insight into a school's learning environment beyond the standard academic measures by assessing the following factors:
+
+1. Academic expectations
+2. Communication
+3. Engagement
+4. Safety and Respect
+
+Based on the above factors, we will delve into the following topics:
+
+* Does there appear to be a correlation between demographic and academic factors and the perceptions of NYC school quality by students, teachers, and parents?
+
+* Do students, teachers, and parents have similar perceptions of NYC school quality?
+
+## _Activating necessary libraries/packages_
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(tidyr)
+library(ggridges)
+library(janitor)
+```
+
+## _Importing Data_
+```{r}
+# demographic data from previous modules
+combined <- read_csv("combined.csv")
+
+# general education data frame
+survey_gened <- read_tsv("masterfile11_gened_final.txt")
+
+# special education data frame
+survey_speced <- read_tsv("masterfile11_d75_final.txt")
+```
+
+## _Cleaning and Simplifying Data Frames_
+```{r}
+# Starting with the survey_gened data frame.  The excel file from the .zip file doesn't match the .txt file as there are columns in the .txt file that aren't in the excel file.  You'll want to import the .txt file to excel if you want to explore the data via excel.  
+
+survey_gened_filtered <- survey_gened %>%
+    # Filter to only pull high school
+    filter(schooltype == "High School") %>%
+    # Selecting DBN and any column with _t_11, _s_11, _p_11, or tot_11.  This will pull the survey scores and not any of the granular question variables
+    select(dbn,
+           schoolname,
+           schooltype,
+           contains("_t_11") | contains("_s_11") | contains("_p_11") | contains("_tot_11"))
+
+# Cleaning the special education data frame.  Unlike the general education data frame, we aren't able to filter this based on schooltype.
+survey_speced_filtered <- survey_speced %>%
+    # Selecting DBN and any column with _t, _s, or _p.  This will pull the survey scores and not any of the granular question variables
+    select(dbn,
+           schoolname,
+           schooltype,
+           contains("_t_11") | contains("_s_11") | contains("_p_11") | contains("_tot_11"))
+
+```
+
+## _Combining Survey Data Frames and Joining with Combined Data Frame_
+```{r}
+# Using bind_rows to combine gened and speced data frame rows into a single data frame.  Given that we want to understand the relationship between survey results and demographic and academic factors, we will want to retain all academics and demographics data that match a survey result.  To do this, we'll want to use a left_join since it will keep all survey result observations and return demographic and academic factors that have a matching DBN.
+survey_combined <- bind_rows(survey_gened_filtered,survey_speced_filtered) %>%
+    rename(DBN = dbn) %>%
+    inner_join(combined, by = "DBN")
+
+# Checking NA count in columns
+na_count <- colSums(is.na(survey_combined))
+
+```
+
+## _Creating Perception and Academic Correlation Matrix_
+
+There appears to be a weak positive correlation between `saf_t_11`, `saf_s_11`, `saf_tot_11`, `aca_s_11`, and `avg_sat_score`.  Overall it appears there is a weak association between a school's safety score and their average SAT score.  This is primarily driven by the safety perception of teachers and students.  In a way this follows [Maslow's hierarchy of needs](https://en.wikipedia.org/wiki/Maslow%27s_hierarchy_of_needs) where safety needs come before esteem needs (i.e. prestige and feelings of accomplishment).
+```{r}
+# Creating correlation matrix
+cor_mat_aca <- survey_combined %>% 
+    select(avg_sat_score, saf_t_11:aca_tot_11) %>%
+    cor(use = "pairwise.complete.obs")
+
+# Converting correlation matrix to a tibble
+cor_tib_aca <- as_tibble(cor_mat_aca, rownames = "variable")
+
+# Review relationships between academic variable and parent, teacher, and student perceptions of school quality Describe moderate to strong relationships (correlation coefficients < than -0.25 OR > than 0.25).  Using avg_sat_score as 
+cors_aca <- cor_tib_aca %>%
+    select(variable, 
+           avg_sat_score) %>%
+    filter(avg_sat_score > 0.25 | avg_sat_score < -0.25) %>%
+    arrange(desc(avg_sat_score))
+```
+
+
+## _Graphing the Perception and Academic Correlations_
+```{r}
+# Using a functional to create multiple scatter plots
+create_scatter <- function(x, y) {     
+  ggplot(data = survey_combined) + 
+    aes_string(x = x, y = y) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme(panel.background = element_rect(fill = "white")) +
+    labs(title = str_c(x," versus ", y),
+         subtitle = str_c("correlation between ", x, " and ", y, " is ", signif(cors_aca[cors_aca$variable == x,2]),6))
+}
+x_var <- cors_aca$variable[2:5]
+y_var <- "avg_sat_score"
+  
+map2(x_var, y_var, create_scatter)
+
+```
+
+## _Reshaping The Dataframe_
+```{r}
+# To see whether parents, students, and teachers have similar perceptions about the four school quality metrics they were surveyed about, we will need to reshape the data frame using pivot_longer
+survey_long <- survey_combined %>%
+    pivot_longer(saf_t_11:aca_p_11, names_to = "survey_question", values_to = "score") %>%
+    # Using case_when instead of if_else, since it's less code.  I'm also using case_when over str_sub so I can assign more interpretable variable names.
+    mutate(response_type = case_when(str_detect(survey_question,"_t_") ~ "teacher",
+                                     str_detect(survey_question,"_p_") ~ "parent",
+                                     str_detect(survey_question,"_s_") ~ "student",
+                                     str_detect(survey_question,"_to") ~ "total",
+                                     TRUE ~ "NA"),
+           metric = case_when(str_detect(survey_question, "saf") ~ "safety and respect",
+                              str_detect(survey_question, "com") ~ "communication",
+                              str_detect(survey_question, "eng") ~ "engagement",
+                              TRUE ~ "academic expectations"))
+```
+
+## _Exploring Perception Differences_
+1. In general the median parent perception is higher on all survey questions compared to teacher and student perceptions.  Parents perceive schools as safer by a larger margin than either teachers or students.  Teachers and students academic perceptions were lower, but somewhat inline with parents academic perceptions
+
+2. Teachers' responses to the survey questions were much more dispersed than either the student or parent responses on every question.  It doesn't appear that teachers perceptions were in much agreement.
+
+3. Students' perceptions were lower on every survey response, but their responses were much less varied compared to teachers.
+```{r}
+survey_long %>%
+    ggplot(aes(survey_question, score, fill = response_type)) +
+    geom_boxplot() + 
+    coord_flip() + 
+    theme(panel.background = element_rect(fill = "white"))
+
+# With ggridges, you have to set up the x and y differently from a boxplot.  This allows you to see the various distributions as well as the different quartile points.
+survey_long %>%
+    ggplot(aes(score, survey_question, fill = response_type)) +
+    stat_density_ridges(quantile_lines = TRUE, quantiles = 2, alpha = 0.4) +
+    theme(panel.background = element_rect(fill = "white"))
+```
+
+## _Exploring Other Potential Correlations_
+* Gender Percent versus SAT Scores
+  + No significant correlation found between gender and any SAT scores
+
+* Demographic Variables versus Survey Scores
+  + Interesting negative correlation between `black_per` and  `saf_tot_11`.  This would suggest that schools with a large black population report feeling less safe.  There are many confounding variables not available in this dataset that could create this perception, so I won't comment on this other than to say this could be explored further with other datasets.
+  
+* Survey Results by Borough
+  + Manhattan had the highest average total survey results among boroughs, led by their engagement and safety results.  Their communication results were the second lowest next to Brooklyn, however.
+  
+* Safety Difference between Students and Parents
+  + One thing that came out of visualizing the correlations between variables and `saf_ps_diff` was that `number_of_exams_with_scores_3_4_or_5` correlation appeared to be driven by only a few outliers.  If you remove the outliers by setting your filter of the `number_of_exams_with_scores_3_4_or_5` variable < 2,000 the correlation pretty much disappears.
+  
+```{r}
+# Exploring correlation between gender percents and SAT scores
+
+# Creating correlation matrix
+cor_mat_gender <- survey_combined %>% 
+    select(male_per:female_per, `SAT Critical Reading Avg. Score`:avg_sat_score) %>%
+    cor(use = "pairwise.complete.obs")
+
+# Converting correlation matrix to a tibble
+cor_tib_gender <- as_tibble(cor_mat_gender, rownames = "variable")
+
+```
+
+```{r}
+# Exploring correlation between demographics and survey score
+
+# Creating correlation matrix
+cor_mat_demo <- survey_combined %>% 
+    select(saf_tot_11:aca_tot_11, asian_per:white_per) %>%
+    cor(use = "pairwise.complete.obs")
+
+# Converting correlation matrix to a tibble
+cor_tib_demo <- as_tibble(cor_mat_demo, rownames = "variable")
+
+cor_tib_demo %>% select(variable, asian_per:white_per)
+
+```
+
+```{r}
+# Ranking boroughs by survey score
+survey_long %>%
+    select(saf_tot_11:aca_tot_11, boro) %>%
+    filter(!is.na(boro)) %>%
+    group_by(boro) %>%
+    summarize(avg_tot_resp = mean(mean(saf_tot_11, na.rm =  TRUE),mean(com_tot_11, na.rm =  TRUE),mean(eng_tot_11, na.rm =  TRUE),mean(aca_tot_11, na.rm =  TRUE)),
+              avg_saf_resp = mean(saf_tot_11, na.rm =  TRUE),
+              avg_com_resp = mean(com_tot_11, na.rm =  TRUE),
+              avg_eng_resp = mean(eng_tot_11, na.rm =  TRUE),
+              avg_eng_resp = mean(aca_tot_11, na.rm =  TRUE)) %>%
+  arrange(desc(avg_tot_resp))
+```
+
+```{r}
+# Creating variables to measure the difference between parents and student survey results
+survey_difference <- survey_combined %>%
+  mutate(saf_ps_diff = saf_p_11 - saf_s_11)
+
+
+# using the clean_names function from the janitor package.  This will remove spacing in the column names so that the graph functional won't error out.
+survey_difference <- clean_names(survey_difference)
+
+cor_mat_diff <- survey_difference %>% 
+    select_if(is.numeric) %>%
+    select(!contains("_11")) %>%
+    cor(use = "pairwise.complete.obs")
+
+# Converting correlation matrix to a tibble
+cor_tib_diff <- as_tibble(cor_mat_diff, rownames = "variable") %>%
+  select(variable, saf_ps_diff)
+
+cor_tib_diff_saf <-cor_tib_diff %>%
+    select(variable, 
+           saf_ps_diff) %>%
+    filter(saf_ps_diff > 0.25 | saf_ps_diff < -0.25) %>%
+    arrange(desc(saf_ps_diff))
+
+# Using a functional to create multiple scatter plots
+create_scatter <- function(x, y) {     
+  ggplot(data = survey_difference) + 
+    aes_string(x = x, y = y) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(method = "lm", se = FALSE) +
+    theme(panel.background = element_rect(fill = "white")) +
+    labs(title = str_c(x," versus ", y),
+         subtitle = str_c("correlation between ", x, " and ", y, " is ", signif(cor_tib_diff_saf[cor_tib_diff_saf$variable == x,2]),6))
+}
+x_var <- cor_tib_diff_saf$variable[2:13]
+y_var <- "saf_ps_diff"
+  
+map2(x_var, y_var, create_scatter)
+
+```
+
+
+
